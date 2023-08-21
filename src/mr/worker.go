@@ -6,7 +6,6 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"time"
 
 	// "io/ioutil"
@@ -23,13 +22,23 @@ type KeyValue struct {
 	Value string
 }
 
+type KeyValues struct {
+	Key   string
+	Value []string
+}
+
 // for sorting by key.
 type ByKey []KeyValue
+type ByKeyValues []KeyValues
 
 // for sorting by key.
 func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+func (a ByKeyValues) Len() int           { return len(a) }
+func (a ByKeyValues) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKeyValues) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -67,7 +76,7 @@ func files_delete(path string) error {
 func task_exec_mapf(work_task *Task, mapf func(string, string) []KeyValue) {
 	//delete temp file
 	pwd, _ := os.Getwd()
-	temp_name := fmt.Sprintf("mr-%d-*-temp.*", work_task.Task_no)
+	temp_name := fmt.Sprintf("mr-%d-*", work_task.Task_no)
 	files_delete(temp_name)
 
 	//read file
@@ -108,18 +117,14 @@ func task_exec_mapf(work_task *Task, mapf func(string, string) []KeyValue) {
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
 			j++
 		}
-		sum := 0
+		values := []string{}
 		for k := i; k < j; k++ {
-			conv_int, err := strconv.Atoi(intermediate[k].Value)
-			if err != nil {
-				log.Fatalf("strconv failed : %s", intermediate[k].Value)
-			}
-			sum += conv_int
+			values = append(values, intermediate[k].Value)
 		}
-		intermediate[i].Value = strconv.Itoa(sum)
+		output := KeyValues{intermediate[i].Key, values}
 		//output
 		reduce_no := ihash(intermediate[i].Key) % work_task.Job_nReduce
-		err := encs_temp[reduce_no].Encode(&intermediate[i])
+		err := encs_temp[reduce_no].Encode(&output)
 		if err != nil {
 			log.Fatalf("Encode failed : %s , %s ", intermediate[i].Key, intermediate[i].Value)
 		}
@@ -129,9 +134,10 @@ func task_exec_mapf(work_task *Task, mapf func(string, string) []KeyValue) {
 
 	//atomic rename file
 	for i := 0; i < work_task.Job_nReduce; i++ {
-		oname := fmt.Sprintf("mr-%d-%d", work_task.Task_no, i)
+		oname := fmt.Sprintf("%s/mr-%d-%d", pwd, work_task.Task_no, i)
 		if exist, _ := file_exist(oname); !exist {
 			err := os.Rename(ofiles_temp[i].Name(), oname)
+			// fmt.Printf("Rename %s to %s\n", ofiles_temp[i].Name(), oname)
 			if err != nil {
 				log.Fatalf("cannot Rename %v to %v", ofiles_temp[i].Name(), oname)
 			}
@@ -154,7 +160,7 @@ func task_exec_reducef(work_task *Task, reducef func(string, []string) string) {
 	//defer remove
 	defer os.Remove(oname_temp)
 
-	intermediate := []KeyValue{}
+	intermediate := []KeyValues{}
 	//open intermediate file
 	for i := 0; i < work_task.Job_nMap; i++ {
 		file_name_in := fmt.Sprintf("mr-%d-%d", i, work_task.Task_no)
@@ -166,7 +172,7 @@ func task_exec_reducef(work_task *Task, reducef func(string, []string) string) {
 		//read intermediate file
 		dec := json.NewDecoder(file)
 		for {
-			var kv KeyValue
+			var kv KeyValues
 			if err := dec.Decode(&kv); err != nil {
 				break
 			}
@@ -176,7 +182,7 @@ func task_exec_reducef(work_task *Task, reducef func(string, []string) string) {
 		file.Close()
 	}
 	//sort
-	sort.Sort(ByKey(intermediate))
+	sort.Sort(ByKeyValues(intermediate))
 
 	//split
 	i := 0
@@ -185,27 +191,19 @@ func task_exec_reducef(work_task *Task, reducef func(string, []string) string) {
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
 			j++
 		}
-		sum := 0
+		values := []string{}
 		for k := i; k < j; k++ {
-			conv_int, err := strconv.Atoi(intermediate[k].Value)
-			if err != nil {
-				log.Fatalf("strconv failed : %s", intermediate[k].Value)
-			}
-			sum += conv_int
-		}
-		values_one := []string{}
-		for k := 0; k < sum; k++ {
-			values_one = append(values_one, "1")
+			values = append(values, intermediate[k].Value...)
 		}
 
-		output := reducef(intermediate[i].Key, values_one)
+		output := reducef(intermediate[i].Key, values)
 
 		fmt.Fprintf(ofile_temp, "%v %v\n", intermediate[i].Key, output)
 
 		i = j
 	}
 	//atomic rename file
-	oname := fmt.Sprintf("mr-out-%d", work_task.Task_no)
+	oname := fmt.Sprintf("%s/mr-out-%d", pwd, work_task.Task_no)
 	if exist, _ := file_exist(oname); !exist {
 		err := os.Rename(ofile_temp.Name(), oname)
 		if err != nil {
@@ -217,41 +215,30 @@ func task_exec_reducef(work_task *Task, reducef func(string, []string) string) {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-	// defination
-	work_task := Task{0, task_type_undefined, "", 0, 0, false}
+	for {
+		// defination
+		work_task := Task{0, task_type_undefined, "", 0, 0, false}
 
-	for work_task.Task_type == task_type_undefined {
-		if ret := CallTaskBegin(&work_task); !ret {
-			log.Fatalf("CallTaskBegin failed")
-		}
-		time.Sleep(time.Second)
-	}
-
-	if work_task.Task_type == task_type_map {
-		task_exec_mapf(&work_task, mapf)
-	} else if work_task.Task_type == task_type_reduce {
-		for !work_task.Condition {
-			if ret := CallTaskBegin(&work_task); !ret {
-				log.Fatalf("CallTaskBegin failed")
-			}
+		for work_task.Task_type == task_type_undefined {
+			CallTaskBegin(&work_task)
 			time.Sleep(time.Second)
 		}
-		task_exec_reducef(&work_task, reducef)
-	}
+		// fmt.Printf("worker initial pid %v type %v no %v\n", os.Getpid(), work_task.Task_type, work_task.Task_no)
 
-	work_task.Condition = false
-	for !work_task.Condition {
-		if ret := CallTaskEnd(&work_task); !ret {
-			log.Fatalf("CallTaskEnd failed")
+		if work_task.Task_type == task_type_map {
+			task_exec_mapf(&work_task, mapf)
+		} else if work_task.Task_type == task_type_reduce {
+			task_exec_reducef(&work_task, reducef)
 		}
-		time.Sleep(time.Second)
+
+		CallTaskEnd(&work_task)
 	}
 }
 
 func CallTaskBegin(work_task *Task) bool {
 	ok := call("Coordinator.Ordinator_begin", &work_task, &work_task)
 	if ok {
-		fmt.Printf("call TaskBegin success!\n")
+		// fmt.Printf("call TaskBegin success! type %v no %v \n", work_task.Task_type, work_task.Task_no)
 	} else {
 		fmt.Printf("call TaskBegin failed!\n")
 	}
@@ -261,7 +248,7 @@ func CallTaskBegin(work_task *Task) bool {
 func CallTaskEnd(work_task *Task) bool {
 	ok := call("Coordinator.Ordinator_end", &work_task, &work_task)
 	if ok {
-		fmt.Printf("call TaskEnd success!\n")
+		// fmt.Printf("call TaskEnd success!\n")
 	} else {
 		fmt.Printf("call TaskEnd failed!\n")
 	}

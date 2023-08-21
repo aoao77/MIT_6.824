@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -16,10 +17,10 @@ const (
 )
 
 // const (
-// 	work_state_idle = iota
-// 	work_state_processing
-// 	work_state_completed
-// 	work_state_failed
+// 	task_state_idle = iota
+// 	task_state_processing
+// 	task_state_completed
+// 	task_state_failed
 // )
 
 const (
@@ -29,8 +30,9 @@ const (
 )
 
 type Task struct {
-	Task_no      int
-	Task_type    int
+	Task_no   int
+	Task_type int
+	// Task_state   int
 	File_name_in string
 	Job_nMap     int
 	Job_nReduce  int
@@ -41,11 +43,14 @@ type Coordinator struct {
 	// Your definitions here.
 	nMap               int
 	nReduce            int
+	nMap_finished      int
+	nReduce_finished   int
 	map_timer          []int64
 	reduce_timer       []int64
 	files_array        []string
 	files_map_array    []uint8
 	files_reduce_array []uint8
+	mutex              sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -62,86 +67,79 @@ func (c *Coordinator) Ordinator_begin(args *Task, reply *Task) error {
 	//Time out
 	timeNow := time.Now().Unix()
 	for i := 0; i < c.nMap; i++ {
+		c.mutex.Lock()
 		if c.files_map_array[i] == file_state_allocated && timeNow-c.map_timer[i] > 10 {
 			c.files_map_array[i] = file_state_created
 			c.map_timer[i] = 0
+			// fmt.Printf("map %d failed timeout\n", i)
 		}
+		c.mutex.Unlock()
 	}
 	for i := 0; i < c.nReduce; i++ {
+		c.mutex.Lock()
 		if c.files_reduce_array[i] == file_state_allocated && timeNow-c.reduce_timer[i] > 10 {
 			c.files_reduce_array[i] = file_state_created
 			c.reduce_timer[i] = 0
+			// fmt.Printf("reduce %d failed timeout\n", i)
 		}
+		c.mutex.Unlock()
 	}
 	//fork task
 	if args.Task_type == task_type_undefined {
-		task_allocated := false
+		c.mutex.Lock()
 		for i, file_state := range c.files_map_array {
 			if file_state == file_state_created {
+				c.files_map_array[i] = file_state_allocated
+				c.map_timer[i] = time.Now().Unix()
+
 				reply.Task_no = i
 				reply.Task_type = task_type_map
 				reply.File_name_in = c.files_array[i]
 				reply.Job_nMap = c.nMap
 				reply.Job_nReduce = c.nReduce
 				reply.Condition = true
-
-				c.files_map_array[i] = file_state_allocated
-				c.map_timer[i] = time.Now().Unix()
-				task_allocated = true
+				// fmt.Printf("map %d created\n", i)
 				break
 			}
 		}
+		c.mutex.Unlock()
 
-		if !task_allocated {
+		c.mutex.Lock()
+		if c.nMap == c.nMap_finished {
 			for i, file_state := range c.files_reduce_array {
 				if file_state == file_state_created {
+					c.files_reduce_array[i] = file_state_allocated
+					c.reduce_timer[i] = time.Now().Unix()
+
 					reply.Task_no = i
 					reply.Task_type = task_type_reduce
 					reply.File_name_in = ""
 					reply.Job_nMap = c.nMap
 					reply.Job_nReduce = c.nReduce
-					reply.Condition = false
-
-					condition_flag := true
-					for _, val := range c.files_map_array {
-						if val != file_state_finished {
-							condition_flag = false
-							break
-						}
-					}
-					if condition_flag {
-						reply.Condition = true
-						c.files_reduce_array[i] = file_state_allocated
-						c.reduce_timer[i] = time.Now().Unix()
-					}
+					reply.Condition = true
+					// fmt.Printf("reduce %d created\n", i)
 					break
 				}
 			}
 		}
-	} else if args.Task_type == task_type_reduce {
-		if c.files_reduce_array[args.Task_no] == file_state_created {
-			condition_flag := true
-			for _, val := range c.files_map_array {
-				if val != file_state_finished {
-					condition_flag = false
-					break
-				}
-			}
-			if condition_flag {
-				reply.Condition = true
-				c.files_reduce_array[args.Task_no] = file_state_allocated
-				c.reduce_timer[args.Task_no] = time.Now().Unix()
-			}
-		}
+		c.mutex.Unlock()
 	}
 	return nil
 }
 
 func (c *Coordinator) Ordinator_end(args *Task, reply *Task) error {
 	if args.Task_type == task_type_map {
+		c.mutex.Lock()
 		c.files_map_array[args.Task_no] = file_state_finished
+		c.nMap_finished++
+		// fmt.Printf("map %d finished\n", args.Task_no)
+		c.mutex.Unlock()
 	} else if args.Task_type == task_type_reduce {
+		c.mutex.Lock()
 		c.files_reduce_array[args.Task_no] = file_state_finished
+		c.nReduce_finished++
+		// fmt.Printf("reduce %d finished\n", args.Task_no)
+		c.mutex.Unlock()
 	}
 	reply.Condition = true
 
@@ -165,15 +163,14 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := true
+	ret := false
 
 	//reduce
-	for i := 0; i < len(c.files_reduce_array); i++ {
-		if c.files_reduce_array[i] != file_state_finished {
-			ret = false
-			break
-		}
+	c.mutex.Lock()
+	if c.nReduce_finished == c.nReduce {
+		ret = true
 	}
+	c.mutex.Unlock()
 
 	return ret
 }
@@ -186,6 +183,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	//input argument
 	c.nMap = len(files)
 	c.nReduce = nReduce
+	c.nMap_finished = 0
+	c.nReduce_finished = 0
 	c.files_array = files
 	c.files_map_array = make([]uint8, len(files))
 	for i := 0; i < len(c.files_map_array); i++ {
