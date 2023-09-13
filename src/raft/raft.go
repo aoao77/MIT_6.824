@@ -94,6 +94,7 @@ type Raft struct {
 	state         int
 	votedNum      int
 	electionTimer int64
+	applyChan     chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -193,7 +194,7 @@ func (rf *Raft) candidate_initial() {
 	rf.state = state_candidate
 	rf.currentTerm++
 	rf.voteFor = rf.me
-	rf.electionTime(500, 200)
+	rf.electionTime(400, 400)
 	rf.votedNum = 0
 }
 
@@ -220,24 +221,33 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DebugPrint(dDrop, "S%d <- C%d term is lower ,  rejecting (%d < %d) \n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		return
-	} else if args.Term > rf.currentTerm {
+	} else if (args.LastLogTerm < rf.log[rf.lastLogIndex()].Term) || (args.LastLogTerm == rf.log[rf.lastLogIndex()].Term && args.LastLogIndex < rf.lastLogIndex()) {
+		if args.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
+		}
+		reply.Term = rf.currentTerm
+		DebugPrint(dDrop, "S%d <- C%d log term or log idx is lower ,  rejecting (%d < %d) \n", rf.me, args.CandidateId, args.LastLogTerm, rf.log[rf.lastLogIndex()].Term)
+		return
+	} else if args.Term > rf.currentTerm && rf.state != state_follower {
 		//turn to follwer
-		DebugPrint(dTerm, "S%d <- C%d term is higher ,  updating (%d > %d) \n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
+		DebugPrint(dTerm, "S%d <- C%d term is higher , ,stepping down  (%d > %d) \n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		rf.follwer_initial(args.Term)
 	}
-
 	//updated
+	rf.currentTerm = args.Term
+	reply.Term = rf.currentTerm
 	if rf.voteFor == null || rf.voteFor == args.CandidateId {
-		if (args.LastLogTerm > rf.log[rf.lastLogIndex()].Term) || (args.LastLogTerm == rf.log[rf.lastLogIndex()].Term && args.LastLogIndex >= rf.lastLogIndex()) {
-			//rf
-			rf.voteFor = args.CandidateId
-			//reply
-			reply.VoteGranted = true
-			DebugPrint(dVote, "S%d granting vote to S%d T%d\n", rf.me, args.CandidateId, rf.currentTerm)
-		}
+		// if (args.LastLogTerm > rf.log[rf.lastLogIndex()].Term) || (args.LastLogTerm == rf.log[rf.lastLogIndex()].Term && args.LastLogIndex >= rf.lastLogIndex()) {
+		//rf
+		rf.voteFor = args.CandidateId
+		rf.electionTime(400, 400)
+		//reply
+		reply.VoteGranted = true
+		//debug
+		DebugPrint(dVote, "S%d granting vote to S%d T%d\n", rf.me, args.CandidateId, rf.currentTerm)
+		// }
 	}
 
-	reply.Term = rf.currentTerm
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
@@ -258,8 +268,10 @@ type RequestAppendArgs struct {
 // capital letters!
 type RequestAppendReply struct {
 	// Your data here (2A).
-	Term    int
-	Success bool
+	Term             int
+	Success          bool
+	Inconsistency    bool
+	ExpectMatchedCnt int
 }
 
 func Min(x, y int) int {
@@ -288,7 +300,7 @@ func (rf *Raft) RequestAppend(args *RequestAppendArgs, reply *RequestAppendReply
 		// return
 		// } else if rf.state == state_candidate {
 		if rf.state == state_candidate {
-			DebugPrint(dLeader, "C%d <- L%d Stepping down T%d\n", rf.me, args.LeaderId, rf.currentTerm)
+			DebugPrint(dLeader, "C%d <- L%d Stepping down T:%d\n", rf.me, args.LeaderId, rf.currentTerm)
 			rf.follwer_initial(args.Term)
 			rf.voteFor = args.LeaderId
 		}
@@ -296,19 +308,32 @@ func (rf *Raft) RequestAppend(args *RequestAppendArgs, reply *RequestAppendReply
 
 	if rf.state == state_follower {
 		reply.Term = rf.currentTerm
+		rf.electionTime(400, 400)
 		if args.PrevLogIndex >= len(rf.log) {
-			DebugPrint(dDrop, "S%d <- L%d dismatched RI:%d CI:%d\n", rf.me, args.LeaderId, args.PrevLogIndex, rf.lastLogIndex())
+			reply.ExpectMatchedCnt = rf.lastLogIndex()
+			reply.Inconsistency = true
+			DebugPrint(dDrop, "S%d <- L%d dismatched InLogIdx:%d CurLogIdx:%d ExpectIdx:%d\n", rf.me, args.LeaderId, args.PrevLogIndex, rf.lastLogIndex(), reply.ExpectMatchedCnt)
 			return
 		} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			DebugPrint(dDrop, "S%d <- L%d dismatched RT:%d CT:%d \n", rf.me, args.LeaderId, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+			prevTerm := rf.log[args.PrevLogIndex].Term
+			idx := args.PrevLogIndex
+			for idx > 0 {
+				if rf.log[idx].Term == prevTerm {
+					idx--
+				} else {
+					break
+				}
+			}
+			reply.ExpectMatchedCnt = idx
+			reply.Inconsistency = true
+			DebugPrint(dDrop, "S%d <- L%d dismatched InTerm:%d CurTerm:%d ExpectIdx:%d\n", rf.me, args.LeaderId, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm, reply.ExpectMatchedCnt)
 			return
 		}
 		//matched
 		//heart beat
+		reply.Success = true
 		if len(args.Entries) == 0 {
-			reply.Success = true
-			DebugPrint(dTimer, "S%d <- L%d received heartbeats T%d\n", rf.me, args.LeaderId, rf.currentTerm)
-			return
+			DebugPrint(dTimer, "S%d <- L%d received heartbeats T:%d\n", rf.me, args.LeaderId, rf.currentTerm)
 		} else {
 			i := args.PrevLogIndex + 1
 			entry_idx := 0
@@ -330,18 +355,28 @@ func (rf *Raft) RequestAppend(args *RequestAppendArgs, reply *RequestAppendReply
 				appendArray := args.Entries[entry_idx:]
 				rf.log = append(rf.log, appendArray...)
 			}
-			DebugPrint(dRecv, "S%d appending len %d CI %d T%d\n", rf.me, len(args.Entries), rf.lastLogIndex(), rf.currentTerm)
-			//update commitIndex
-			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = Min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
-				for rf.lastApplied < rf.commitIndex {
-					rf.lastApplied++
-					//Q:apply status machine
-				}
-				DebugPrint(dRecv, "S%d updating CM:%d LA:%d T%d\n", rf.me, rf.commitIndex, rf.lastApplied, rf.currentTerm)
-			}
+			// for key, val := range rf.log {
+			// 	DebugPrint(dLog, "S%d LogIdx:%d  LogVal:%v T:%d\n", rf.me, key, val, rf.currentTerm)
+			// }
+			DebugPrint(dRecv, "S%d appending LogLen:%d LogIdx:%d T:%d\n", rf.me, len(args.Entries), rf.lastLogIndex(), rf.currentTerm)
 		}
-		reply.Success = true
+		//update commitIndexing CommitIdx:1 AppliedIdx:
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = Min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+			for rf.lastApplied < rf.commitIndex {
+				rf.lastApplied++
+				//Q:apply status machine
+				applyMsg := ApplyMsg{}
+				applyMsg.CommandValid = true
+				applyMsg.Command = rf.log[rf.lastApplied].Command
+				applyMsg.CommandIndex = rf.lastApplied
+				//send
+				rf.applyChan <- applyMsg
+			}
+			DebugPrint(dRecv, "S%d updating CommitIdx:%d AppliedIdx:%d T:%d\n", rf.me, rf.commitIndex, rf.lastApplied, rf.currentTerm)
+		}
+	} else {
+		DebugPrint(dDrop, "S%d <- S%d dropping is not follower T:%d \n", rf.me, args.LeaderId, rf.currentTerm)
 	}
 }
 
@@ -369,12 +404,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	isLeader = rf.state == state_leader
 	if isLeader {
 		term = rf.currentTerm
 		index = len(rf.log)
 		rf.log = append(rf.log, entry{term, command})
-		DebugPrint(dClient, "S%d add command at idx %d T %d\n", rf.me, rf.lastLogIndex(), rf.currentTerm)
+		DebugPrint(dClient, "client add command:%v to S%d  at idx:%d T:%d\n", command, rf.me, rf.lastLogIndex(), rf.currentTerm)
 	}
 
 	return index, term, isLeader
@@ -425,7 +462,7 @@ func (rf *Raft) ProcessRequestVote(i int, args *RequestVoteArgs) {
 	} else if reply.VoteGranted {
 		rf.votedNum++
 		DebugPrint(dVote, "S%d <- S%d Got Vote \n", rf.me, i)
-		if rf.isMajority(rf.votedNum) {
+		if rf.isMajority(rf.votedNum) && rf.state != state_leader {
 			DebugPrint(dLeader, "S%d Achieved Majority for T%d \n", rf.me, rf.currentTerm)
 			rf.leader_initial()
 		}
@@ -444,9 +481,9 @@ func (rf *Raft) ProcessRequestAppend(i int) {
 	args := RequestAppendArgs{rf.currentTerm, rf.me, prevLogIndex, rf.log[prevLogIndex].Term, appendEntries, rf.commitIndex}
 	reply := RequestAppendReply{}
 	if len(appendEntries) == 0 {
-		DebugPrint(dTimer, "S%d -> S%d sending heartbeats \n", rf.me, i)
+		DebugPrint(dTimer, "S%d -> S%d sending heartbeats T:%d\n", rf.me, i, rf.currentTerm)
 	} else {
-		DebugPrint(dAppend, "S%d -> S%d appending logs N:%d len:%d\n", rf.me, i, rf.nextIndex[i], len(appendEntries))
+		DebugPrint(dAppend, "S%d -> S%d appending logs N:%d len:%d T:%d\n", rf.me, i, rf.nextIndex[i], len(appendEntries), rf.currentTerm)
 	}
 	rf.mu.Unlock()
 	rf.sendRequestAppend(i, &args, &reply)
@@ -460,21 +497,21 @@ func (rf *Raft) ProcessRequestAppend(i int) {
 		rf.matchIndex[i] = prevLogIndex + len(appendEntries)
 		rf.nextIndex[i] = rf.lastLogIndex() + 1
 		if len(appendEntries) == 0 {
-			DebugPrint(dTimer, "S%d <- S%d received heartbeats M:%d N:%d\n", rf.me, i, rf.matchIndex[i], rf.nextIndex[i])
+			DebugPrint(dTimer, "S%d <- S%d received heartbeats M:%d N:%d T:%d\n", rf.me, i, rf.matchIndex[i], rf.nextIndex[i], rf.currentTerm)
 		} else {
-			DebugPrint(dAppend, "S%d <- S%d Appended Log M:%d N:%d\n", rf.me, i, rf.matchIndex[i], rf.nextIndex[i])
+			DebugPrint(dAppend, "S%d <- S%d Appended Log M:%d N:%d T:%d\n", rf.me, i, rf.matchIndex[i], rf.nextIndex[i], rf.currentTerm)
 		}
 	} else { //failed
-		if rf.nextIndex[i] > 0 {
-			rf.nextIndex[i]--
+		DebugPrint(dAppend, "S%d <- S%d Failed M:%d N:%d replay T:%d T:%d\n", rf.me, i, rf.matchIndex[i], rf.nextIndex[i], reply.Term, rf.currentTerm)
+		if reply.Inconsistency && rf.nextIndex[i] > 0 {
+			rf.nextIndex[i] = reply.ExpectMatchedCnt + 1
 		}
-		DebugPrint(dAppend, "S%d <- S%d Failed M:%d N:%d \n", rf.me, i, rf.matchIndex[i], rf.nextIndex[i])
 	}
 	rf.mu.Unlock()
 }
 
 // ticker
-func (rf *Raft) ticker(applyCh chan ApplyMsg) {
+func (rf *Raft) ticker() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state == state_follower || rf.state == state_candidate {
@@ -502,7 +539,7 @@ func (rf *Raft) ticker(applyCh chan ApplyMsg) {
 			for temp_commit_idx < len(rf.log)-1 {
 				temp_append_num := 0
 				for i := 0; i < len(rf.matchIndex); i++ {
-					if rf.matchIndex[i] >= temp_commit_idx {
+					if rf.matchIndex[i] > temp_commit_idx {
 						temp_append_num++
 					}
 				}
@@ -510,7 +547,10 @@ func (rf *Raft) ticker(applyCh chan ApplyMsg) {
 					temp_commit_idx++
 					if rf.log[temp_commit_idx].Term == rf.currentTerm {
 						rf.commitIndex = temp_commit_idx
-						DebugPrint(dCommit, "S%d committed idx:%d at T:%d \n", rf.me, rf.commitIndex, rf.currentTerm)
+						DebugPrint(dCommit, "S%d CommitIdx:%d at T:%d \n", rf.me, rf.commitIndex, rf.currentTerm)
+						// for key, val := range rf.log {
+						// 	DebugPrint(dLog, "S%d LogIdx:%d  LogVal:%v T:%d\n", rf.me, key, val, rf.currentTerm)
+						// }
 					}
 				} else {
 					break
@@ -522,11 +562,11 @@ func (rf *Raft) ticker(applyCh chan ApplyMsg) {
 				//Q:apply status machine
 				applyMsg := ApplyMsg{}
 				applyMsg.CommandValid = true
-				applyMsg.Command = rf.log[rf.lastApplied]
+				applyMsg.Command = rf.log[rf.lastApplied].Command
 				applyMsg.CommandIndex = rf.lastApplied
 				//send
-				applyCh <- applyMsg
-				DebugPrint(dCommit, "S%d applied idx:%d at T:%d \n", rf.me, rf.lastApplied, rf.currentTerm)
+				rf.applyChan <- applyMsg
+				DebugPrint(dCommit, "S%d AppliedIdx:%d at T:%d \n", rf.me, rf.lastApplied, rf.currentTerm)
 			}
 		}
 
@@ -536,7 +576,7 @@ func (rf *Raft) ticker(applyCh chan ApplyMsg) {
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.electionTimer -= ms
-		DebugPrint(dInfo, "S%d time pass %d  T:%d\n", rf.me, ms, rf.currentTerm)
+		// DebugPrint(dInfo, "S%d time pass %d  T:%d\n", rf.me, ms, rf.currentTerm)
 	}
 }
 
@@ -555,7 +595,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
+	rf.applyChan = applyCh
 	// Your initialization code here (2A, 2B, 2C).
 	DebugPrint(dLog, "S%d start \n", rf.me)
 	// persistent state on all servers
@@ -572,7 +612,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker(applyCh)
+	go rf.ticker()
 
 	return rf
 }

@@ -52,7 +52,7 @@ func debugInit() {
 		debugVerbosity = getVerbosity()
 		debugStart = time.Now()
 
-		f, err := os.OpenFile("raft.log", os.O_CREATE|os.O_APPEND|os.O_RDWR, os.ModePerm)
+		f, err := os.OpenFile("raft.log", os.O_CREATE|os.O_TRUNC|os.O_RDWR, os.ModePerm)
 		if err != nil {
 			return
 		}
