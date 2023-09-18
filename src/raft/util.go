@@ -2,7 +2,6 @@ package raft
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strconv"
@@ -19,6 +18,7 @@ const (
 	dCommit  logTopic = "CMIT"
 	dDrop    logTopic = "DROP"
 	dError   logTopic = "ERRO"
+	dTrans   logTopic = "TRAN"
 	dInfo    logTopic = "INFO"
 	dLeader  logTopic = "LEAD"
 	dLog     logTopic = "LOG1"
@@ -49,15 +49,16 @@ var debugIsStart bool
 func debugInit() {
 	if !debugIsStart {
 		debugIsStart = true
-		debugVerbosity = getVerbosity()
+		debugVerbosity = 1
 		debugStart = time.Now()
 
-		f, err := os.OpenFile("raft.log", os.O_CREATE|os.O_TRUNC|os.O_RDWR, os.ModePerm)
-		if err != nil {
-			return
-		}
-		multiWriter := io.MultiWriter(os.Stdout, f)
-		log.SetOutput(multiWriter)
+		// f, err := os.OpenFile("raft.log", os.O_CREATE|os.O_TRUNC|os.O_RDWR, os.ModePerm)
+		// if err != nil {
+		// 	return
+		// }
+		// multiWriter := io.MultiWriter(os.Stdout)
+		// multiWriter := io.MultiWriter(f)
+		// log.SetOutput(multiWriter)
 		log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 	}
 }
