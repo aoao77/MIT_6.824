@@ -25,7 +25,8 @@ TOPICS = {
     "WARN": "bright_yellow",
     "ERRO": "red",
     "TRCE": "red",
-    "APND": "bright_yellow",
+    "APND": "white",
+    "RECV":"bright_blue",
 }
 def main(argv):
     # define
@@ -75,10 +76,12 @@ def main(argv):
     panic = False
     for line in input_:
         try:
+            space_split = line.split(" ")
+            time_num = len(space_split[0])
             # Assume format from Go output
-            time = int(line[:6])
-            topic = line[7:11]
-            msg = line[12:].strip()
+            time = int(line[:time_num])
+            topic = line[time_num + 1:time_num + 5]
+            msg = line[time_num + 6:].strip()
             # To ignore some topics
             if topic not in topics:
                 continue
