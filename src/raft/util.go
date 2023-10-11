@@ -11,28 +11,31 @@ import (
 // Debugging
 const Debug = false
 
-type logTopic string
+type LogTopic string
 
 const (
-	dClient  logTopic = "CLNT"
-	dCommit  logTopic = "CMIT"
-	dDrop    logTopic = "DROP"
-	dError   logTopic = "ERRO"
-	dTrans   logTopic = "TRAN"
-	dInfo    logTopic = "INFO"
-	dLeader  logTopic = "LEAD"
-	dLog     logTopic = "LOG1"
-	dLog2    logTopic = "LOG2"
-	dPersist logTopic = "PERS"
-	dSnap    logTopic = "SNAP"
-	dTerm    logTopic = "TERM"
-	dTest    logTopic = "TEST"
-	dTimer   logTopic = "TIMR"
-	dTrace   logTopic = "TRCE"
-	dVote    logTopic = "VOTE"
-	dAppend  logTopic = "APND"
-	dRecv    logTopic = "RECV"
-	dWarn    logTopic = "WARN"
+	dClient   LogTopic = "CLNT"
+	dCommit   LogTopic = "CMIT"
+	dDrop     LogTopic = "DROP"
+	dError    LogTopic = "ERRO"
+	dTrans    LogTopic = "TRAN"
+	dInfo     LogTopic = "INFO"
+	dLeader   LogTopic = "LEAD"
+	dLog      LogTopic = "LOG1"
+	dLog2     LogTopic = "LOG2"
+	dPersist  LogTopic = "PERS"
+	dSnap     LogTopic = "SNAP"
+	dTerm     LogTopic = "TERM"
+	dTest     LogTopic = "TEST"
+	dTimer    LogTopic = "TIMR"
+	dTrace    LogTopic = "TRCE"
+	dVote     LogTopic = "VOTE"
+	dAppend   LogTopic = "APND"
+	dRecv     LogTopic = "RECV"
+	dWarn     LogTopic = "WARN"
+	dServ     LogTopic = "SERV"
+	dServErro LogTopic = "SVRO"
+	dLock     LogTopic = "LOCK"
 )
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -65,7 +68,7 @@ func debugInit() {
 
 // command   VERBOSE=1 go test -run TestInitialElection2A
 // DebugPrint(dTimer, "S%d Leader, checking heartbeats", rf.me)
-func DebugPrint(topic logTopic, format string, a ...interface{}) {
+func DebugPrint(topic LogTopic, format string, a ...interface{}) {
 	debugInit()
 	if debugVerbosity >= 1 {
 		time := time.Since(debugStart).Microseconds()

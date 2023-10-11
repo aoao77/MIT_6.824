@@ -27,6 +27,9 @@ TOPICS = {
     "TRCE": "red",
     "APND": "white",
     "RECV":"bright_blue",
+    "SERV":"green",
+    "SVRO":"red",
+    "LOCK": "bright_yellow",
 }
 def main(argv):
     # define

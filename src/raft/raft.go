@@ -57,6 +57,20 @@ type entry struct {
 	Command interface{}
 }
 
+type Result struct {
+	Seq     int
+	Value   string
+	Success bool
+}
+
+type Op struct {
+	Op       string
+	Key      string
+	Value    string
+	ClientId int64
+	Seq      int
+}
+
 const (
 	state_undefined = iota
 	state_follower
@@ -100,6 +114,8 @@ type Raft struct {
 	lastIncludedIndex int
 	lastIncludedTerm  int
 	snapshot          []byte
+	heartbeatCnt      []int
+	curAppliedCnt     int
 }
 
 func (rf *Raft) toRel(abs int) int {
@@ -126,6 +142,9 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Unlock()
 
 	return term, isleader
+}
+func (rf *Raft) GetRaftSize() int {
+	return rf.persister.RaftStateSize()
 }
 
 // save Raft's persistent state to stable storage,
@@ -341,6 +360,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			//debug
 			DebugPrint(dVote, "S%d granting vote to S%d T%d\n", rf.me, args.CandidateId, rf.currentTerm)
+		} else {
+			DebugPrint(dError, "S%d -> S%d reject for term or idx T%d\n", rf.me, args.CandidateId, rf.currentTerm)
 		}
 	}
 	reply.Term = rf.currentTerm
@@ -407,11 +428,17 @@ func (rf *Raft) RequestAppend(args *RequestAppendArgs, reply *RequestAppendReply
 				return
 			}
 		} else {
+			//receive old snapshot
+			if prevLogIdx != -1 {
+				DebugPrint(dDrop, "S%d <- L%d snapshot old prevIdx:%d curIdx:%d \n", rf.me, args.LeaderId, args.PrevLogIndex, rf.lastIncludedIndex)
+				return
+			}
 			if rf.lastIncludedTerm != args.PrevLogTerm {
 				reply.Inconsistency = true
 				reply.ConflictTerm = rf.lastIncludedTerm
 				reply.XIndex = rf.lastIncludedIndex
 				DebugPrint(dDrop, "S%d <- L%d dismatched snapshot XIndex:%d \n", rf.me, args.LeaderId, reply.XIndex)
+				return
 			}
 		}
 		//matched
@@ -439,28 +466,33 @@ func (rf *Raft) RequestAppend(args *RequestAppendArgs, reply *RequestAppendReply
 				copy(appendArray, args.Entries[entry_idx:])
 				rf.log = append(rf.log, appendArray...)
 			}
-			// DebugPrint(dRecv, "S%d <- S%d receiving InLogLen:%d CurLogLen:%d InCMD:%v T:%d\n", rf.me, args.LeaderId, len(args.Entries), len(rf.log), args.Entries[0], rf.currentTerm)
+			DebugPrint(dRecv, "S%d <- S%d receiving InLogLen:%d CurLogLen:%d InCMD:%v T:%d\n", rf.me, args.LeaderId, len(args.Entries), len(rf.log), args.Entries[0], rf.currentTerm)
 			rf.persist()
 		}
 		//update commitIndexing CommitIdx:1 AppliedIdx:
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = Max(rf.commitIndex, rf.lastIncludedIndex)
 			rf.lastApplied = Max(rf.lastApplied, rf.lastIncludedIndex)
+			// DebugPrint(dLog2, "S%d <- S%d before curAppliedCnt:%d lastIncludedIndex:%d T:%d\n", rf.me, args.LeaderId, rf.curAppliedCnt, rf.lastIncludedIndex, rf.currentTerm)
+			rf.curAppliedCnt = Max(rf.curAppliedCnt, rf.lastIncludedIndex)
 			rf.commitIndex = Min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 			for rf.lastApplied < rf.commitIndex {
 				rf.lastApplied++
-				//Q:apply status machine
+			}
+			DebugPrint(dCommit, "S%d Follower CI:%d AI:%d T:%d\n", rf.me, rf.commitIndex, rf.lastApplied, rf.currentTerm)
+			// DebugPrint(dLog2, "S%d <- S%d after curAppliedCnt:%d lastApplied:%d T:%d\n", rf.me, args.LeaderId, rf.curAppliedCnt, rf.lastApplied, rf.currentTerm)
+			for rf.curAppliedCnt < rf.lastApplied {
+				rf.curAppliedCnt++
 				applyMsg := ApplyMsg{}
 				applyMsg.CommandValid = true
-				applyMsg.Command = rf.log[rf.toRel(rf.lastApplied)].Command
-				applyMsg.CommandIndex = rf.lastApplied
-				// DebugPrint(dCommit, "S%d Follower OutCMD:%v CI:%d AI:%d T:%d\n", rf.me, applyMsg.Command, rf.commitIndex, rf.lastApplied, rf.currentTerm)
-				//send
+				applyMsg.Command = rf.log[rf.toRel(rf.curAppliedCnt)].Command
+				applyMsg.CommandIndex = rf.curAppliedCnt
 				rf.mu.Unlock()
+				// DebugPrint(dCommit, "S%d Follower OutCMD:%v CI:%d AI:%d T:%d\n", rf.me, applyMsg.Command, rf.commitIndex, rf.lastApplied, rf.currentTerm)
 				rf.applyChan <- applyMsg
 				rf.mu.Lock()
 			}
-			DebugPrint(dCommit, "S%d Follower CI:%d AI:%d T:%d\n", rf.me, rf.commitIndex, rf.lastApplied, rf.currentTerm)
+			// DebugPrint(dLog2, "S%d <- S%d end curAppliedCnt:%d lastApplied:%d T:%d\n", rf.me, args.LeaderId, rf.curAppliedCnt, rf.lastApplied, rf.currentTerm)
 		}
 	} else {
 		DebugPrint(dDrop, "S%d <- S%d dropping is not follower T:%d \n", rf.me, args.LeaderId, rf.currentTerm)
@@ -497,6 +529,9 @@ func (rf *Raft) RequestSnapshot(args *RequestSnapshotArgs, reply *RequestSnapsho
 		rf.persist()
 	} else if args.LeaderId != rf.voteFor {
 		DebugPrint(dDrop, "S%d <- L%d leader is time out ,  vote for :S%d T:%d \n", rf.me, args.LeaderId, rf.voteFor, rf.currentTerm)
+		return
+	} else if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		DebugPrint(dDrop, "S%d <- L%d lastIncludedIndex too small,  args:%d cur:%d T:%d \n", rf.me, args.LeaderId, args.LastIncludedIndex, rf.lastIncludedIndex, rf.currentTerm)
 		return
 	}
 
@@ -591,7 +626,7 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) electionTime(start int64, length int64) {
 	rf.electionTimer = start + (rand.Int63() % length)
-	// DebugPrint(dInfo, "S%d Timer Reset:%d T:%d\n", rf.me, rf.electionTimer, rf.currentTerm)
+	DebugPrint(dInfo, "S%d Timer Reset:%d T:%d\n", rf.me, rf.electionTimer, rf.currentTerm)
 }
 
 func (rf *Raft) isMajority(num int) bool {
@@ -648,12 +683,20 @@ func (rf *Raft) ProcessRequestAppend(i int) {
 		}
 		args = RequestAppendArgs{rf.currentTerm, rf.me, prevLogIndex, prevTerm, appendEntries, rf.commitIndex}
 		reply = RequestAppendReply{0, false, false, 0, 0, 0}
+		// DebugPrint(dTimer, "S%d -> S%d heartbeatCnt:%d lenAppd:%d T:%d\n", rf.me, i, rf.heartbeatCnt, len(appendEntries), rf.currentTerm)
+		if len(appendEntries) == 0 && rf.heartbeatCnt[i] < 10 {
+			rf.mu.Unlock()
+			return
+		}
 		if len(appendEntries) == 0 {
 			DebugPrint(dTimer, "S%d -> S%d sending heartbeats T:%d\n", rf.me, i, rf.currentTerm)
 		} else {
 			DebugPrint(dAppend, "S%d -> S%d appending logs N:%d len:%d T:%d\n", rf.me, i, rf.nextIndex[i], len(appendEntries), rf.currentTerm)
 		}
 	}
+	//if send then reset
+	rf.heartbeatCnt[i] = 0
+	//unlock
 	rf.mu.Unlock()
 	rf.sendRequestAppend(i, &args, &reply)
 	// receive
@@ -814,18 +857,44 @@ func (rf *Raft) ticker() {
 				rf.mu.Lock()
 				DebugPrint(dCommit, "S%d Leader CI:%d AI:%d at T:%d \n", rf.me, rf.commitIndex, rf.lastApplied, rf.currentTerm)
 			}
+			rf.curAppliedCnt = rf.lastApplied
 		}
 
 		// pause for a random amount of time between 100 and 200
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 100)
+		// ms := 50 + (rand.Int63() % 100)
+		var ms int64 = 10
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		rf.electionTimer -= ms
+		for i := 0; i < len(rf.heartbeatCnt); i++ {
+			rf.heartbeatCnt[i]++
+		}
 		rf.mu.Unlock()
 	}
 	DebugPrint(dError, "S%d killed  T:%d \n", rf.me, rf.currentTerm)
+}
+
+func (rf *Raft) Replay() map[int64]*Result {
+	ret := map[int64]*Result{}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.lastIncludedIndex == 0 && len(rf.log) == 0 {
+		return ret
+	}
+	for _, v := range rf.log {
+		op, ok := v.Command.(Op)
+		if ok {
+			ret[op.ClientId].Seq = op.Seq
+			ret[op.ClientId].Success = true
+			ret[op.ClientId].Value = op.Value
+		} else {
+			DebugPrint(dError, "S%d parse cmd failed  T:%d \n", rf.me, rf.currentTerm)
+		}
+	}
+	DebugPrint(dLog, "S%d replay  T:%d \n", rf.me, rf.currentTerm)
+	return ret
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -859,6 +928,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastIncludedIndex = null
 	rf.lastIncludedTerm = 0
 	rf.snapshot = nil
+	rf.heartbeatCnt = make([]int, len(rf.peers))
+	rf.curAppliedCnt = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	//read persist snapshot data

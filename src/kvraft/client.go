@@ -1,13 +1,18 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderId int
+	clientId int64
+	seq      int
 }
 
 func nrand() int64 {
@@ -21,6 +26,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientId = nrand()
+	ck.seq = 0
 	return ck
 }
 
@@ -35,9 +42,32 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	ck.seq++
+	args := GetArgs{key, ck.clientId, ck.seq}
+	reply := GetReply{"", ""}
+	k := ck.leaderId
+	for {
+		k = k % len(ck.servers)
+		//call
+		DPrintf("CLNT", "Get call begin Key:%v at id:%d,seq:%d", args.Key, args.ClientId%10, args.Seq)
+		ok := ck.servers[k].Call("KVServer.Get", &args, &reply)
+		if ok {
+			if reply.Err == E_noLeader || reply.Err == E_seqNoLinear {
+				DPrintf("SVRO", "Get failed no LEADER id:%d seq:%d", ck.clientId%10, args.Seq)
+				k++
+			} else if reply.Err == E_noError {
+				ck.leaderId = k
+				DPrintf("CLNT", "Get call success id:%d seq:%d key:%v val:%v", ck.clientId%10, args.Seq, key, reply.Value)
+				break
+			} else {
+				DPrintf("SVRO", "Get other error id:%d  seq:%d", ck.clientId%10, args.Seq)
+			}
+		} else {
+			DPrintf("SVRO", "Get timeout id:%d seq:%d", ck.clientId%10, args.Seq)
+			k++
+		}
+	}
+	return reply.Value
 }
 
 // shared by Put and Append.
@@ -49,7 +79,31 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	ck.seq++
+	args := PutAppendArgs{key, value, op, ck.clientId, ck.seq}
+	reply := PutAppendReply{""}
+	k := ck.leaderId
+	for {
+		k = k % len(ck.servers)
+		//call
+		DPrintf("CLNT", "PutAppend call begin Key:%v Val:%v at id:%d seq:%d", args.Key, args.Value, args.ClientId%10, args.Seq)
+		ok := ck.servers[k].Call("KVServer.PutAppend", &args, &reply)
+		if ok {
+			if reply.Err == E_noLeader || reply.Err == E_seqNoLinear {
+				DPrintf("SVRO", "PutAppend failed no LEADER id:%d  seq:%d", ck.clientId%10, args.Seq)
+				k++
+			} else if reply.Err == E_noError {
+				DPrintf("CLNT", "PutAppend call success id:%d  seq:%d", ck.clientId%10, args.Seq)
+				ck.leaderId = k
+				break
+			} else {
+				DPrintf("SVRO", "PutAppend other error id:%d  seq:%d", ck.clientId%10, args.Seq)
+			}
+		} else {
+			DPrintf("SVRO", "PutAppend timeout id:%d seq:%d", ck.clientId%10, args.Seq)
+			k++
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
