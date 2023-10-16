@@ -26,7 +26,21 @@ type Op struct {
 	Seq      int
 }
 
-type result = raft.Result
+type pair struct {
+	key   string
+	value string
+}
+
+type tableItem struct {
+	id  int64
+	res result
+}
+
+type result struct {
+	Seq     int
+	Value   string
+	Success bool
+}
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -43,6 +57,7 @@ type KVServer struct {
 	requestCh     map[int64]chan bool
 	requestSeq    map[int64]int
 	rfTerm        int
+	// lastApplied   int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -300,6 +315,9 @@ func (kv *KVServer) ticker() {
 		if m.SnapshotValid {
 			//snapshot
 		} else if m.CommandValid {
+			//update applied index
+			// kv.lastApplied = m.CommandIndex
+			//parse command
 			p, ok := (m.Command).(Op)
 			DPrintf("LOG1", "S%d apply cmd:%v", kv.me, p)
 			if ok {
@@ -344,8 +362,22 @@ func (kv *KVServer) ticker() {
 							e := labgob.NewEncoder(w)
 							//encode index
 							e.Encode(m.CommandIndex)
-							//encode server data
-							// e.Encode(xlog)
+							//encode database
+							var xdatabase []interface{}
+							for k, v := range kv.database {
+								data := pair{k, v}
+								xdatabase = append(xdatabase, data)
+							}
+							e.Encode(xdatabase)
+							//encode request_table
+							var xrequestTable []interface{}
+							for k, v := range kv.request_table {
+								res := *v
+								item := tableItem{k, res}
+								xrequestTable = append(xrequestTable, item)
+							}
+							e.Encode(xrequestTable)
+							//call snapshot
 							kv.rf.Snapshot(m.CommandIndex, w.Bytes())
 						}
 						/* notify request */
@@ -374,6 +406,75 @@ func (kv *KVServer) ticker() {
 		}
 	}
 }
+
+func (kv *KVServer) readSnapshot(snapshot []byte) {
+	if len(snapshot) == 0 {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var lastIncludedIndex int
+	var xdatabase []interface{}
+	var xrequestTable []interface{}
+	//decode
+	if d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&xdatabase) != nil ||
+		d.Decode(&xrequestTable) != nil {
+		DPrintf("SVRO", "S%d snapshot Decode() error", kv.me)
+		return
+	}
+	//assign database
+	for i := 0; i < len(xdatabase); i++ {
+		p, ok := (xdatabase[i]).(pair)
+		if ok {
+			kv.database[p.key] = p.value
+		} else {
+			DPrintf("SVRO", "S%d xdatabase Decode() error", kv.me)
+		}
+	}
+	//assign request table
+	for i := 0; i < len(xrequestTable); i++ {
+		p, ok := (xrequestTable[i]).(tableItem)
+		if ok {
+			kv.request_table[p.id] = &p.res
+		} else {
+			DPrintf("SVRO", "S%d xrequestTable Decode() error", kv.me)
+		}
+	}
+}
+
+// func (kv *KVServer) replayLog() {
+// 	xlog := kv.rf.GetLog(kv.lastApplied)
+// 	for i := 0; i < len(xlog); i++ {
+// 		p, ok := (xlog[i]).(Op)
+// 		if ok {
+// 			val, ok := kv.request_table[p.ClientId]
+// 			//existed
+// 			if ok {
+// 				//duplicated
+// 				if val.Seq == p.Seq {
+// 					continue
+// 				}
+// 			}
+// 			//apply to database
+// 			switch p.Op {
+// 			case op_get:
+// 				kv.request_table[p.ClientId].Value = kv.get(p.Key)
+// 				kv.request_table[p.ClientId].Success = true
+// 			case op_append:
+// 				kv.append(p.Key, p.Value)
+// 				kv.request_table[p.ClientId].Success = true
+// 			case op_put:
+// 				kv.put(p.Key, p.Value)
+// 				kv.request_table[p.ClientId].Success = true
+// 			default:
+// 				kv.request_table[p.ClientId].Success = false
+// 			}
+// 		} else {
+// 			DPrintf("SVRO", "S%d replayLog Decode() error", kv.me)
+// 		}
+// 	}
+// }
 
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -407,9 +508,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.requestCh = make(map[int64]chan bool)
 	kv.requestSeq = make(map[int64]int)
 	kv.rfTerm = 0
-	//restore
-	kv.request_table = kv.rf.Replay()
-	// kv.database =
+	//snapshot
+	kv.readSnapshot(kv.rf.GetSnapshot())
 	DPrintf("LOG1", "S%d StartKVServer", kv.me)
 	// start ticker goroutine to start elections
 	go kv.ticker()
