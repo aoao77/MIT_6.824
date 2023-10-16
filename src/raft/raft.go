@@ -63,14 +63,6 @@ type Result struct {
 	Success bool
 }
 
-type Op struct {
-	Op       string
-	Key      string
-	Value    string
-	ClientId int64
-	Seq      int
-}
-
 const (
 	state_undefined = iota
 	state_follower
@@ -145,6 +137,9 @@ func (rf *Raft) GetState() (int, bool) {
 }
 func (rf *Raft) GetRaftSize() int {
 	return rf.persister.RaftStateSize()
+}
+func (rf *Raft) GetSnapshot() []byte {
+	return rf.snapshot
 }
 
 // save Raft's persistent state to stable storage,
@@ -876,26 +871,16 @@ func (rf *Raft) ticker() {
 	DebugPrint(dError, "S%d killed  T:%d \n", rf.me, rf.currentTerm)
 }
 
-func (rf *Raft) Replay() map[int64]*Result {
-	ret := map[int64]*Result{}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.lastIncludedIndex == 0 && len(rf.log) == 0 {
-		return ret
-	}
-	for _, v := range rf.log {
-		op, ok := v.Command.(Op)
-		if ok {
-			ret[op.ClientId].Seq = op.Seq
-			ret[op.ClientId].Success = true
-			ret[op.ClientId].Value = op.Value
-		} else {
-			DebugPrint(dError, "S%d parse cmd failed  T:%d \n", rf.me, rf.currentTerm)
-		}
-	}
-	DebugPrint(dLog, "S%d replay  T:%d \n", rf.me, rf.currentTerm)
-	return ret
-}
+// func (rf *Raft) GetLog(lastApplied int) []interface{} {
+// 	logLastApplied := rf.toRel(lastApplied) + 1
+// 	var xlog []interface{}
+// 	if logLastApplied >= 0 && logLastApplied < len(rf.log) && len(rf.log) > 0 {
+// 		for i := 0; i <= logLastApplied; i++ {
+// 			xlog = append(xlog, rf.log[i])
+// 		}
+// 	}
+// 	return xlog
+// }
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
