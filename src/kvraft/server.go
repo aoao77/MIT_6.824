@@ -107,7 +107,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 					break LOOP
 				} else {
 					DPrintf("SVRO", "S%d sleep", kv.me)
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(20 * time.Millisecond)
 				}
 			}
 		}
@@ -202,7 +202,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 					break LOOP
 				} else {
 					DPrintf("SVRO", "S%d sleep", kv.me)
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(20 * time.Millisecond)
 				}
 			}
 		}

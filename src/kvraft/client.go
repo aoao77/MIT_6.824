@@ -3,6 +3,7 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"time"
 
 	"6.5840/labrpc"
 )
@@ -66,6 +67,9 @@ func (ck *Clerk) Get(key string) string {
 			DPrintf("SVRO", "Get timeout id:%d seq:%d", ck.clientId%10, args.Seq)
 			k++
 		}
+		if k%len(ck.servers) == ck.leaderId {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 	return reply.Value
 }
@@ -102,6 +106,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		} else {
 			DPrintf("SVRO", "PutAppend timeout id:%d seq:%d", ck.clientId%10, args.Seq)
 			k++
+		}
+		if k%len(ck.servers) == ck.leaderId {
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }
