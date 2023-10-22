@@ -478,14 +478,16 @@ func (rf *Raft) RequestAppend(args *RequestAppendArgs, reply *RequestAppendReply
 			// DebugPrint(dLog2, "S%d <- S%d after curAppliedCnt:%d lastApplied:%d T:%d\n", rf.me, args.LeaderId, rf.curAppliedCnt, rf.lastApplied, rf.currentTerm)
 			for rf.curAppliedCnt < rf.lastApplied {
 				rf.curAppliedCnt++
-				applyMsg := ApplyMsg{}
-				applyMsg.CommandValid = true
-				applyMsg.Command = rf.log[rf.toRel(rf.curAppliedCnt)].Command
-				applyMsg.CommandIndex = rf.curAppliedCnt
-				rf.mu.Unlock()
-				// DebugPrint(dCommit, "S%d Follower OutCMD:%v CI:%d AI:%d T:%d\n", rf.me, applyMsg.Command, rf.commitIndex, rf.lastApplied, rf.currentTerm)
-				rf.applyChan <- applyMsg
-				rf.mu.Lock()
+				if rf.toRel(rf.curAppliedCnt) >= 0 {
+					applyMsg := ApplyMsg{}
+					applyMsg.CommandValid = true
+					applyMsg.Command = rf.log[rf.toRel(rf.curAppliedCnt)].Command
+					applyMsg.CommandIndex = rf.curAppliedCnt
+					rf.mu.Unlock()
+					// DebugPrint(dCommit, "S%d Follower OutCMD:%v CI:%d AI:%d T:%d\n", rf.me, applyMsg.Command, rf.commitIndex, rf.lastApplied, rf.currentTerm)
+					rf.applyChan <- applyMsg
+					rf.mu.Lock()
+				}
 			}
 			// DebugPrint(dLog2, "S%d <- S%d end curAppliedCnt:%d lastApplied:%d T:%d\n", rf.me, args.LeaderId, rf.curAppliedCnt, rf.lastApplied, rf.currentTerm)
 		}
@@ -839,7 +841,7 @@ func (rf *Raft) ticker() {
 				}
 			}
 			//update lastApplied
-			for rf.lastApplied < rf.commitIndex {
+			for rf.lastApplied < rf.commitIndex && rf.state == state_leader {
 				rf.lastApplied++
 				//Q:apply status machine
 				applyMsg := ApplyMsg{}
@@ -870,17 +872,6 @@ func (rf *Raft) ticker() {
 	}
 	DebugPrint(dError, "S%d killed  T:%d \n", rf.me, rf.currentTerm)
 }
-
-// func (rf *Raft) GetLog(lastApplied int) []interface{} {
-// 	logLastApplied := rf.toRel(lastApplied) + 1
-// 	var xlog []interface{}
-// 	if logLastApplied >= 0 && logLastApplied < len(rf.log) && len(rf.log) > 0 {
-// 		for i := 0; i <= logLastApplied; i++ {
-// 			xlog = append(xlog, rf.log[i])
-// 		}
-// 	}
-// 	return xlog
-// }
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this

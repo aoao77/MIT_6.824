@@ -27,13 +27,13 @@ type Op struct {
 }
 
 type pair struct {
-	key   string
-	value string
+	Key   string
+	Value string
 }
 
 type tableItem struct {
-	id  int64
-	res result
+	Id  int64
+	Res result
 }
 
 type result struct {
@@ -121,7 +121,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 					reply.Err = err
 					break LOOP
 				} else {
-					DPrintf("SVRO", "S%d sleep", kv.me)
+					// DPrintf("SVRO", "S%d sleep", kv.me)
 					time.Sleep(20 * time.Millisecond)
 				}
 			}
@@ -216,7 +216,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 					reply.Err = err
 					break LOOP
 				} else {
-					DPrintf("SVRO", "S%d sleep", kv.me)
+					// DPrintf("SVRO", "S%d sleep", kv.me)
 					time.Sleep(20 * time.Millisecond)
 				}
 			}
@@ -313,7 +313,10 @@ func (kv *KVServer) getLeaderState() (Err, bool) {
 func (kv *KVServer) ticker() {
 	for m := range kv.applyCh {
 		if m.SnapshotValid {
-			//snapshot
+			//reload request table & database
+			kv.mu.Lock()
+			kv.readSnapshot(m.Snapshot)
+			kv.mu.Unlock()
 		} else if m.CommandValid {
 			//update applied index
 			// kv.lastApplied = m.CommandIndex
@@ -356,21 +359,23 @@ func (kv *KVServer) ticker() {
 							kv.request_table[p.ClientId].Success = false
 						}
 						DPrintf("LOG1", "S%d exec result clientId :%v Seq:%d op:%v bool:%s key:%v val:%v", kv.me, p.ClientId, p.Seq, p.Op, kv.request_table[p.ClientId].Success, p.Key, kv.database[p.Key])
+						/* leaderstate */
+						_, leaderstate := kv.getLeaderState()
 						/* snapshot */
-						if kv.maxraftstate != -1 && kv.rf.GetRaftSize() >= kv.maxraftstate {
+						if kv.maxraftstate != -1 && kv.rf.GetRaftSize() >= kv.maxraftstate && m.CommandIndex%10 == 0 {
 							w := new(bytes.Buffer)
 							e := labgob.NewEncoder(w)
 							//encode index
 							e.Encode(m.CommandIndex)
 							//encode database
-							var xdatabase []interface{}
+							var xdatabase []pair
 							for k, v := range kv.database {
 								data := pair{k, v}
 								xdatabase = append(xdatabase, data)
 							}
 							e.Encode(xdatabase)
 							//encode request_table
-							var xrequestTable []interface{}
+							var xrequestTable []tableItem
 							for k, v := range kv.request_table {
 								res := *v
 								item := tableItem{k, res}
@@ -382,7 +387,6 @@ func (kv *KVServer) ticker() {
 						}
 						/* notify request */
 						ch, ok := kv.requestCh[p.ClientId]
-						_, leaderstate := kv.getLeaderState()
 						//ch is existed, only create by leader
 						if ok && ch != nil && kv.requestSeq[p.ClientId] == p.Seq && leaderstate {
 							DPrintf("LOCK", "S%d write begin ch id:%d", kv.me, p.ClientId)
@@ -414,67 +418,35 @@ func (kv *KVServer) readSnapshot(snapshot []byte) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	var lastIncludedIndex int
-	var xdatabase []interface{}
-	var xrequestTable []interface{}
+	var xdatabase []pair
+	var xrequestTable []tableItem
 	//decode
 	if d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&xdatabase) != nil ||
 		d.Decode(&xrequestTable) != nil {
-		DPrintf("SVRO", "S%d snapshot Decode() error", kv.me)
+		DPrintf("SVRO", "S%d readSnapshot Decode() error index:%v database:%v requestTable:%v", kv.me, d.Decode(&lastIncludedIndex), d.Decode(&xdatabase), d.Decode(&xrequestTable))
 		return
+	}
+	//clear database
+	for k := range kv.database {
+		delete(kv.database, k)
 	}
 	//assign database
 	for i := 0; i < len(xdatabase); i++ {
-		p, ok := (xdatabase[i]).(pair)
-		if ok {
-			kv.database[p.key] = p.value
-		} else {
-			DPrintf("SVRO", "S%d xdatabase Decode() error", kv.me)
-		}
+		p := xdatabase[i]
+		kv.database[p.Key] = p.Value
+	}
+	//clear request_table
+	for k := range kv.request_table {
+		delete(kv.request_table, k)
 	}
 	//assign request table
 	for i := 0; i < len(xrequestTable); i++ {
-		p, ok := (xrequestTable[i]).(tableItem)
-		if ok {
-			kv.request_table[p.id] = &p.res
-		} else {
-			DPrintf("SVRO", "S%d xrequestTable Decode() error", kv.me)
-		}
+		p := xrequestTable[i]
+		kv.request_table[p.Id] = &p.Res
 	}
+	DPrintf("LOG1", "S%d readSnapshot xdatabase:%v xrequestTable:%v", kv.me, kv.database, kv.request_table)
 }
-
-// func (kv *KVServer) replayLog() {
-// 	xlog := kv.rf.GetLog(kv.lastApplied)
-// 	for i := 0; i < len(xlog); i++ {
-// 		p, ok := (xlog[i]).(Op)
-// 		if ok {
-// 			val, ok := kv.request_table[p.ClientId]
-// 			//existed
-// 			if ok {
-// 				//duplicated
-// 				if val.Seq == p.Seq {
-// 					continue
-// 				}
-// 			}
-// 			//apply to database
-// 			switch p.Op {
-// 			case op_get:
-// 				kv.request_table[p.ClientId].Value = kv.get(p.Key)
-// 				kv.request_table[p.ClientId].Success = true
-// 			case op_append:
-// 				kv.append(p.Key, p.Value)
-// 				kv.request_table[p.ClientId].Success = true
-// 			case op_put:
-// 				kv.put(p.Key, p.Value)
-// 				kv.request_table[p.ClientId].Success = true
-// 			default:
-// 				kv.request_table[p.ClientId].Success = false
-// 			}
-// 		} else {
-// 			DPrintf("SVRO", "S%d replayLog Decode() error", kv.me)
-// 		}
-// 	}
-// }
 
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
